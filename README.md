@@ -32,7 +32,7 @@ jobs:
       
       - name: Jenkins Any PR Validate
         id: jenkins_any_pr_validate
-        uses: YourOrg/YourActionRepo@v1
+        uses: KyMidd/GitHubActions-JenkinsCommitNotificationTrackJob@v1
         with:
           jenkins-username: "${{ secrets.JENKINS_USERNAME }}"
           jenkins-api-token: "${{ secrets.JENKINS_API_TOKEN }}"
