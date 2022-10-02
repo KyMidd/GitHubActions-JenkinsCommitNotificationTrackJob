@@ -1,8 +1,10 @@
 # PR Validate, _Any Job Run
 
-This Action is intended for PRs in GitHub that use the xxxxx_Any job on Jenkins for validations. It sends a Jenkins Commit Notification to Jenkins, then uses that information to identify the xxx_Any job to run. It launches it. 
+This Action is intended for PRs in GitHub that use the xxxxx_Any job on Jenkins for validations. It sends a Jenkins Commit Notification to Jenkins, then uses that information to identify the xxx_Any job name. It finds all jobs with that names and checks the git commit SHA that drove them to be created. When it finds a match, it latches onto that job and starts tracking it. When that job finishes, it translates the exit message from Jenkins into an exit code and surfaces it to GitHub. 
 
-Jenkins sometimes launches several jobs to process all changes, so this Action has logic to identify the branch's SHA commit signature, and maps it to the Jenkins commit attribute on the run, definitively linking the two. 
+This Action is intended to test code from GitHub and block PRs from being merged if there is a failure. 
+
+Lots more information on Medium at: https://medium.com/@kymidd/lets-do-devops-github-to-jenkins-custom-integration-using-actions-bash-curl-for-api-hacking-e1089bc29a56
 
 # Example call of this action
 
