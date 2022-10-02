@@ -1,0 +1,267 @@
+name: Jenkins _Any PR Validate
+description: 'Notify Jenkins a commit was made, then track job matching commit SHA'
+inputs:
+  jenkins-server:
+    description: 'URL of the Jenkins server with trailing slash'
+    required: true
+  jenkins-username:
+    description: 'User name for accessing Jenkins. Store this in a secret for security'
+    required: true
+  jenkins-api-token:
+    description: 'API token for accessing Jenkins. Store this in a secret for security'
+    required: true
+  github_repository:
+    description: 'Org and repo name on github, e.g. YourOrg/YourRepo'
+    required: true
+  commit_sha:
+    description: 'The SHA of the commit being tested, used to map to Jenkins jobs'
+    required: true
+  branch:
+    description: 'The name of the github branch for PR being tested, e.g. origin/feature/your-branch-name'
+    required: true
+  poll-time:
+    description: 'How often (seconds) to poll the jenkins server for results'
+    required: true
+    default: '10'
+  timeout-value:
+    description: 'How long (seconds) to poll before the action times out'
+    required: true
+    default: '600'
+  verbose:
+    description: 'true/false - turns on verbose logging'
+    required: false
+    default: 'false'
+  
+runs:
+  using: "composite"
+  steps:
+    - id: jenkins-any-pr-validate
+      run: |
+        #Parameters
+        urlOfJenkinsServer="${{ inputs.jenkins-server }}"
+        pollTime=${{ inputs.poll-time }}
+        timeoutValue=${{ inputs.timeout-value }}
+        verbose=${{ inputs.verbose }}
+        userName=${{ inputs.jenkins-username }}
+        api_token=${{ inputs.jenkins-api-token }}
+        github_repository="${{ inputs.github_repository }}"
+        commit_sha="${{ inputs.commit_sha }}"
+        branch="${{ inputs.branch }}"
+        
+        # Verbose
+        if [[ $verbose == true ]]; then
+          echo urlOfJenkinsServer is $urlOfJenkinsServer
+          echo pollTime is $pollTime
+          echo timeoutValue is $timeoutValue
+          echo verbose is $verbose
+          echo github_repository is $github_repository
+          echo commit_sha is $commit_sha
+          echo branch is $branch
+        fi
+
+        if [[ -z $commit_sha ]]; then
+          echo "We can't identify the commit SHA, please investigate"
+          exit 1
+        fi
+
+        ### Construct variables based on primitives
+        repo_clone_url="https://github.com/${github_repository}.git"
+        branch=origin/${branch}
+
+        # Calculate timeout
+        startTimeInSeconds=$(date +%s)
+        finishTimeInSeconds=$(($startTimeInSeconds + $timeoutValue))
+
+        ### Print what's happening
+        echo "--------------------------------------"
+        echo "Summoning that slumbering beast, Jenkins, from Azathoth"
+        echo "Sending commit notification to server for repo ${repo_clone_url} on server ${urlOfJenkinsServer}"
+        echo "--------------------------------------"
+
+        ### Send commit notification to Jenkins
+        ### This should start several jobs, but it doesn't appear to, not sure why
+
+        COMMITNOTIFICATION=$(curl -I -s -X POST -u "$userName:$api_token" "${urlOfJenkinsServer}/git/notifyCommit?url=${repo_clone_url}")
+
+        if [[ $verbose == true ]]; then
+          echo "verbose: Results of commit notification:"
+          echo "$COMMITNOTIFICATION"
+          echo "--------------------------------------"
+        fi
+
+        if [[ "$COMMITNOTIFICATION" == *"200 OK"* ]]; then
+          echo "Commit notification delivered successfully"
+          echo "--------------------------------------"
+        else
+          # If we don't get a 200 OK, then no jobs were triggered
+          echo "Something has gone wrong"
+          echo "Did you send the right Jenkins token? Jenkins1 and Jenkins2-PRD tokens are stored as different GitHub Actions Secrets"
+          echo "Please feel free to re-run the job and let DevOps know something went wrong here"
+          echo "$COMMITNOTIFICATION"
+          echo "--------------------------------------"
+          exit 1
+        fi
+
+        ### Identify triggered jobs
+        jobs_triggered=$(echo "$COMMITNOTIFICATION" | grep -E 'Triggered' | cut -d " " -f 2 || true)
+        number_of_jobs_triggered=$(echo "$jobs_triggered" | awk NF | wc -l | sed 's/^ *//g' || true)
+
+        if [[ $verbose == true ]]; then
+          echo "verbose: jobs triggered_:" 
+          echo ""${jobs_triggered}""
+          echo "verbose: number of jobs triggered: "${number_of_jobs_triggered}""
+          echo "--------------------------------------"
+        fi
+
+        # If no jobs triggered, notify but exit success
+        if [[ "$(echo "$number_of_jobs_triggered" | grep "^0$")" ]]; then
+          echo 'However, no jobs were triggered'
+          echo 'This likely is not an error, but means no Jenkins jobs monitor this code path'
+          echo 'Check your Jenkins job config!'
+          echo '--------------------------------------'
+          exit 0
+        fi
+
+        # Identify the _Any job
+        jenkinsJobName=$(echo "$COMMITNOTIFICATION" | grep -E 'Triggered' | cut -d " " -f 2 | grep -E '_Any' | rev | cut -d "/" -f 2 | rev | head -n 1)
+        if [[ $verbose == true ]]; then
+          echo "jenkinsJobName is $jenkinsJobName"
+          echo "--------------------------------------"
+        fi
+
+        ## Rest until Jenkins job starts
+        while [ i = i ]; do
+            if [[ $verbose == true ]]; then
+              echo "urlOfJenkinsServer is $urlOfJenkinsServer"
+              echo "jenkinsJobName is $jenkinsJobName"
+              echo "commit_sha is $commit_sha"
+              echo "branch is $branch"
+              echo "--------------------------------------"
+            fi
+            
+            JOBID=$(curl -s -X GET -u "$userName:$api_token" "${urlOfJenkinsServer}/job/${jenkinsJobName}/api/json?depth=10&pretty=true&tree=allBuilds\[actions\[buildsByBranchName\[*\[*\[*\]\]\]\]\]" | jq ".allBuilds[].actions[].buildsByBranchName | select (.[]?.marked.SHA1==\"${commit_sha}\") | .\"${branch}\" | .buildNumber" | sort -r | head -n 1)
+            
+            if [[ $verbose == true ]]; then
+              echo "verbose: Results of commit notification:"
+              echo "JOBID is: $JOBID"
+              echo "--------------------------------------"
+            fi
+
+            if [ -z "$JOBID" ]; then
+              # Job is still starting
+              echo Job still starting
+              echo "--------------------------------------"
+              sleep $pollTime
+            else
+              # Job has started, and we captured ID
+              break
+            fi
+        done
+
+        ### Jobs have started, monitor them
+        # Poll Jenkins for the jobs that have started based on SHA of commit
+        JOBURL=$(curl -s -X GET -u "$userName:$api_token" "${urlOfJenkinsServer}/job/${jenkinsJobName}/api/json?depth=10&tree=builds\[queueId,id,building,result,url\]&pretty=true" | jq -r ".builds[] | select(.id==\"${JOBID}\") | .url" | head -n 1)
+
+        # If values are false, loop wait and check in a few seconds
+        while [ -z "$JOBID" ]; do
+            echo "Sleeping a bit while Jenkins prepares to run our job..."
+            sleep $pollTime
+            currentTimeSeconds=$(date +%s)
+            if [[ "$currentTimeSeconds" > "$finishTimeInSeconds" ]]; then
+              echo "Timeout value reached. Exiting with error due to timeout"
+              echo "--------------------------------------"
+              exit 1
+            fi
+            JOBID=$(curl -s -X GET -u "$userName:$api_token" "${urlOfJenkinsServer}/job/${jenkinsJobName}/api/json?depth=10&pretty=true&tree=allBuilds\[actions\[buildsByBranchName\[*\[*\[*\]\]\]\]\]" | jq ".allBuilds[].actions[].buildsByBranchName | select (.[]?.marked.SHA1==\"${commit_sha}\") | .\"${branch}\" | .buildNumber" | sort -r | head -n 1)
+            JOBURL=$(curl -s -X GET -u "$userName:$api_token" "${urlOfJenkinsServer}/job/${jenkinsJobName}/api/json?depth=10&tree=builds\[queueId,id,building,result,url\]&pretty=true" | jq -r ".builds[] | select(.id==\"${JOBID}\") | .url" | head -n 1)
+
+            if [[ $verbose == true ]]; then
+              echo "JOBID is $JOBID"
+              echo "JOBURL is $JOBURL"
+            fi
+        done
+
+        if [ -z "$JOBID" ]; then
+            echo JOBID not populated
+            exit 1
+        fi
+
+        if [ -z "$JOBURL" ]; then
+            echo JOBURL not populated
+            exit 1
+        else
+            echo "Job started!"
+            echo "Job URL: ${JOBURL}"
+            echo "--------------------------------------"
+        fi
+
+        ### Track job and surface exit code
+
+        # Check job status
+        echo "Query Build Job Status"
+        echo "--------------------------------------"
+        JOBSTATUS=$(curl -s -X GET -u "$userName:$api_token" "${urlOfJenkinsServer}/job/${jenkinsJobName}/api/json?depth=10&tree=builds\[queueId,id,building,result,url\]&pretty=true" | jq -r ".builds[] | select(.id==\"$JOBID\") | .result")
+        BUILDING=$(curl -s -X GET -u "$userName:$api_token" "${urlOfJenkinsServer}/job/${jenkinsJobName}/api/json?depth=10&tree=builds\[queueId,id,building,result,url\]&pretty=true" | jq -r ".builds[] | select(.id==\"$JOBID\") | .building")
+
+        # If building, cheer
+        if [[ $BUILDING == true ]]; then
+            echo "Job is currently building, woot!"
+            echo "--------------------------------------"
+        fi
+
+        # Loop over job checking
+        while [ i = i ]; do
+            # Check job status
+            echo "Query Build Job Status"
+            BUILDING=$(curl -s -X GET -u "$userName:$api_token" "${urlOfJenkinsServer}/job/${jenkinsJobName}/api/json?depth=10&tree=builds\[queueId,id,building,result,url\]&pretty=true" | jq -r ".builds[] | select(.id==\"$JOBID\") | .building")
+            JOBSTATUS=$(curl -s -X GET -u "$userName:$api_token" "${urlOfJenkinsServer}/job/${jenkinsJobName}/api/json?depth=10&tree=builds\[queueId,id,building,result,url\]&pretty=true" | jq -r ".builds[] | select(.id==\"$JOBID\") | .result")
+            if [ "$JOBSTATUS" == "null" ]; then
+                # Job is still building
+                echo "Job is still building: ${BUILDING}"
+            else
+                # If JOBSTATUS populated, it has finished. Break and exit watch loop
+                break
+            fi
+
+            # Wait pollTime seconds
+            echo "Jenkins still working hard, sleeping for ${pollTime} seconds"
+            echo "--------------------------------------"
+            sleep $pollTime
+            currentTimeSeconds=$(date +%s)
+            if [[ "$currentTimeSeconds" > "$finishTimeInSeconds" ]]; then
+                echo "Timeout value reached. Exiting with error due to timeout"
+                echo "--------------------------------------"
+                exit 1
+            fi
+        done 
+
+        # Read output value from job
+        #Potential Values: https://javadoc.jenkins-ci.org/hudson/model/Result.html
+        #SUCCESS - Build had no errors
+        #UNSTABLE - Build had some errors but they were not fatal
+        #FAILURE - Build had a fatal error
+        #NOT_BUILT - Module was not build
+        #ABORTED - Manually aborted
+
+        # Close out
+        echo "Job status is ${JOBSTATUS}"
+        if [[ "$JOBSTATUS" == "SUCCESS" ]]; then
+            echo "Build completed successfully"
+            echo "--------------------------------------"
+            exit 0
+        elif [[ "$JOBSTATUS" == "UNSTABLE" ]]; then
+            echo "Build completed with UNSTABLE result"
+            echo "--------------------------------------"
+            exit 0
+        else
+            echo "Job status is ${JOBSTATUS}"
+            echo "Build did not complete successfully"
+            echo "Sorry dude"
+            echo "--------------------------------------"
+            exit 1
+        fi
+
+      shell: bash
+branding:
+  icon: 'arrow-down-circle'
+  color: 'gray-dark'
